@@ -46,19 +46,21 @@ function diff(a, b, options) {
  * @returns {object} initialized diff state
  */
 function initState(options, patch) {
-	if(typeof options === 'object') {
+	if (typeof options === 'object') {
 		return {
 			patch: patch,
 			hash: orElse(isFunction, options.hash, defaultHash),
 			makeContext: orElse(isFunction, options.makeContext, defaultContext),
-			invertible: !(options.invertible === false)
+			invertible: !(options.invertible === false),
+			arrayMethod: options.arrayMethod || 'greedy'
 		};
 	} else {
 		return {
 			patch: patch,
 			hash: orElse(isFunction, options, defaultHash),
 			makeContext: defaultContext,
-			invertible: true
+			invertible: true,
+			arrayMethod: 'greedy'
 		};
 	}
 }
@@ -73,11 +75,11 @@ function initState(options, patch) {
  * @returns {Object} updated diff state
  */
 function appendChanges(a, b, path, state) {
-	if(Array.isArray(a) && Array.isArray(b)) {
+	if (Array.isArray(a) && Array.isArray(b)) {
 		return appendArrayChanges(a, b, path, state);
 	}
 
-	if(isValidObject(a) && isValidObject(b)) {
+	if (isValidObject(a) && isValidObject(b)) {
 		return appendObjectChanges(a, b, path, state);
 	}
 
@@ -97,10 +99,10 @@ function appendObjectChanges(o1, o2, path, state) {
 	var patch = state.patch;
 	var i, key;
 
-	for(i=keys.length-1; i>=0; --i) {
+	for (i = keys.length - 1; i >= 0; --i) {
 		key = keys[i];
 		var keyPath = path + '/' + encodeSegment(key);
-		if(o1[key] !== void 0) {
+		if (o1[key] !== void 0) {
 			appendChanges(o1[key], o2[key], keyPath, state);
 		} else {
 			patch.push({ op: 'add', path: keyPath, value: o2[key] });
@@ -108,11 +110,11 @@ function appendObjectChanges(o1, o2, path, state) {
 	}
 
 	keys = Object.keys(o1);
-	for(i=keys.length-1; i>=0; --i) {
+	for (i = keys.length - 1; i >= 0; --i) {
 		key = keys[i];
-		if(o2[key] === void 0) {
+		if (o2[key] === void 0) {
 			var p = path + '/' + encodeSegment(key);
-			if(state.invertible) {
+			if (state.invertible) {
 				patch.push({ op: 'test', path: p, value: o1[key] });
 			}
 			patch.push({ op: 'remove', path: p });
@@ -134,9 +136,75 @@ function appendArrayChanges(a1, a2, path, state) {
 	var a1hash = array.map(state.hash, a1);
 	var a2hash = array.map(state.hash, a2);
 
-	var lcsMatrix = lcs.compare(a1hash, a2hash);
+	if (state.arrayMethod === 'greedy') {
+		return appendArrayChangesGreedy(a1hash, a2hash, a1, a2, path, state);
+	}
+	else {
+		var lcsMatrix = lcs.compare(a1hash, a2hash);
+		return lcsToJsonPatch(a1, a2, path, state, lcsMatrix);
+	}
+}
 
-	return lcsToJsonPatch(a1, a2, path, state, lcsMatrix);
+
+function appendArrayChangesGreedy(currentHash, targetHash, current, target, path, state) {
+	var patch = state.patch;
+	var index = 0;
+	var childpath;
+	currentHash = currentHash.slice();
+	current = current.slice();
+
+	while (index < target.length || index < current.length) {
+		childpath = path + '/' + index
+
+		if (index < current.length) {
+			var targetIndex = targetHash.indexOf(currentHash[index], index);
+
+			// The item in current does not exists in target => remove it.
+			if (targetIndex == -1) {
+				if (state.invertible)
+					patch.push({ op: 'test', path: childpath, value: current[index] });
+				patch.push({ op: 'remove', path: childpath });
+
+				currentHash.splice(index, 1);
+				current.splice(index, 1);
+				continue;
+			}
+		}
+
+		if (index < target.length) {
+			// Search for the target item in current.
+			var currentIndex = currentHash.indexOf(targetHash[index], index);
+
+			// The item is already where we want it, recurse and check next one.
+			if (currentIndex === index) {
+				appendChanges(current[index], target[index], childpath, state);
+				++index;
+			}
+			// The item in target does not exists in current, add it.
+			else if (currentIndex === -1) {
+				var last = patch[patch.length - 1];
+				if (last && last.op === 'remove' && last.path == childpath)
+					patch[patch.length - 1] = { op: 'replace', path: childpath, value: target[index] };
+				else
+					patch.push({ op: 'add', path: childpath, value: target[index] });
+
+				currentHash.splice(currentIndex, 0, targetHash[index]);
+				current.splice(currentIndex, 0, target[index]);
+				++index;
+			}
+			// The item was found further into the array, move it.
+			else {
+				patch.push({ op: 'move', path: childpath, from: path + '/' + currentIndex });
+
+				currentHash.splice(index, 0, currentHash[currentIndex]);
+				current.splice(index, 0, current[currentIndex]);
+				currentHash.splice(currentIndex + 1, 1);
+				current.splice(currentIndex + 1, 1);
+			}
+		}
+	}
+
+	return state
 }
 
 /**
@@ -152,21 +220,21 @@ function appendArrayChanges(a1, a2, path, state) {
  */
 function lcsToJsonPatch(a1, a2, path, state, lcsMatrix) {
 	var offset = 0;
-	return lcs.reduce(function(state, op, i, j) {
+	return lcs.reduce(function (state, op, i, j) {
 		var last, context;
 		var patch = state.patch;
 		var p = path + '/' + (j + offset);
 
 		if (op === lcs.REMOVE) {
 			// Coalesce adjacent remove + add into replace
-			last = patch[patch.length-1];
+			last = patch[patch.length - 1];
 			context = state.makeContext(j, a1);
 
-			if(state.invertible) {
+			if (state.invertible) {
 				patch.push({ op: 'test', path: p, value: a1[j], context: context });
 			}
 
-			if(last !== void 0 && last.op === 'add' && last.path === p) {
+			if (last !== void 0 && last.op === 'add' && last.path === p) {
 				last.op = 'replace';
 				last.context = context;
 			} else {
@@ -178,7 +246,8 @@ function lcsToJsonPatch(a1, a2, path, state, lcsMatrix) {
 		} else if (op === lcs.ADD) {
 			// See https://tools.ietf.org/html/rfc6902#section-4.1
 			// May use either index===length *or* '-' to indicate appending to array
-			patch.push({ op: 'add', path: p, value: a2[i],
+			patch.push({
+				op: 'add', path: p, value: a2[i],
 				context: state.makeContext(j, a1)
 			});
 
@@ -202,8 +271,8 @@ function lcsToJsonPatch(a1, a2, path, state, lcsMatrix) {
  * @returns {object} updated diff state
  */
 function appendValueChanges(a, b, path, state) {
-	if(a !== b) {
-		if(state.invertible) {
+	if (a !== b) {
+		if (state.invertible) {
 			state.patch.push({ op: 'test', path: path, value: a });
 		}
 
